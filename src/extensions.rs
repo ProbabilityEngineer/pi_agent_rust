@@ -9763,7 +9763,7 @@ impl FsConnector {
         })
     }
 
-    pub fn handle_host_call(&self, call: &HostCallPayload) -> HostResultPayload {
+    pub fn handle_host_call(&self, call: &HostCallPayload, extension_id: Option<&str>) -> HostResultPayload {
         if !call.method.trim().eq_ignore_ascii_case("fs") {
             return HostResultPayload {
                 call_id: call.call_id.clone(),
@@ -9779,7 +9779,7 @@ impl FsConnector {
             };
         }
 
-        let result = self.handle_fs_params(&call.params);
+        let result = self.handle_fs_params(&call.params, extension_id);
         match result {
             Ok(output) => HostResultPayload {
                 call_id: call.call_id.clone(),
@@ -9798,7 +9798,7 @@ impl FsConnector {
         }
     }
 
-    fn handle_fs_params(&self, params: &Value) -> std::result::Result<Value, HostCallError> {
+    fn handle_fs_params(&self, params: &Value, extension_id: Option<&str>) -> std::result::Result<Value, HostCallError> {
         let op = params
             .get("op")
             .and_then(Value::as_str)
@@ -9812,7 +9812,7 @@ impl FsConnector {
         })?;
 
         let capability = op.required_capability();
-        let policy_check = self.policy.evaluate(capability);
+        let policy_check = self.policy.evaluate_for(capability, extension_id);
         if policy_check.decision != PolicyDecision::Allow {
             return Err(HostCallError {
                 code: HostCallErrorCode::Denied,
@@ -13473,7 +13473,7 @@ mod wasm_host {
         }
 
         async fn dispatch_fs(&self, call: &HostCallPayload) -> std::result::Result<String, String> {
-            let result = self.fs.handle_host_call(call);
+            let result = self.fs.handle_host_call(call, self.extension_id.as_deref());
 
             if result.is_error {
                 let error = result.error.as_ref().map_or_else(
@@ -30112,7 +30112,7 @@ mod tests {
             cancel_token: None,
             context: None,
         };
-        let ok_result = connector.handle_host_call(&ok_call);
+        let ok_result = connector.handle_host_call(&ok_call, None);
         assert!(!ok_result.is_error);
 
         let denied_call = HostCallPayload {
@@ -30124,7 +30124,7 @@ mod tests {
             cancel_token: None,
             context: None,
         };
-        let denied = connector.handle_host_call(&denied_call);
+        let denied = connector.handle_host_call(&denied_call, None);
         assert!(denied.is_error);
         assert_eq!(
             denied.error.as_ref().expect("error").code,
@@ -30155,7 +30155,7 @@ mod tests {
             cancel_token: None,
             context: None,
         };
-        let denied = connector.handle_host_call(&denied_call);
+        let denied = connector.handle_host_call(&denied_call, None);
         assert!(denied.is_error);
         assert_eq!(
             denied.error.as_ref().expect("error").code,
@@ -30191,7 +30191,7 @@ mod tests {
             cancel_token: None,
             context: None,
         };
-        let result = connector.handle_host_call(&call);
+        let result = connector.handle_host_call(&call, None);
         assert!(result.is_error);
         assert_eq!(
             result.error.as_ref().expect("error").code,
@@ -30224,7 +30224,7 @@ mod tests {
             context: None,
         };
 
-        let result = connector.handle_host_call(&call);
+        let result = connector.handle_host_call(&call, None);
         assert!(result.is_error);
         assert_eq!(
             result.error.as_ref().expect("error").code,
@@ -30273,7 +30273,7 @@ mod tests {
             context: None,
         };
 
-        let result = connector.handle_host_call(&call);
+        let result = connector.handle_host_call(&call, None);
         assert!(result.is_error);
         assert_eq!(
             result.error.as_ref().expect("error").code,
