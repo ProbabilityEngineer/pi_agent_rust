@@ -1383,7 +1383,7 @@ impl Session {
 
     /// Final shutdown flush respecting the configured durability mode.
     pub async fn flush_autosave_on_shutdown(&mut self) -> Result<()> {
-        if !self.autosave_durability.should_flush_on_shutdown() || self.path.is_none() {
+        if !self.autosave_durability.should_flush_on_shutdown() {
             return Ok(());
         }
         let result = self.flush_autosave(AutosaveFlushTrigger::Shutdown).await;

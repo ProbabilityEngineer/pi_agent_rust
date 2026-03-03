@@ -1334,10 +1334,12 @@ async fn run(
     };
 
     // Best-effort autosave flush on shutdown.
-    let cx = pi::agent_cx::AgentCx::for_request();
-    if let Ok(mut guard) = session_handle.lock(cx.cx()).await {
-        if let Err(e) = guard.flush_autosave_on_shutdown().await {
-            eprintln!("Warning: Failed to flush session autosave: {e}");
+    if !cli.no_session {
+        let cx = pi::agent_cx::AgentCx::for_request();
+        if let Ok(mut guard) = session_handle.lock(cx.cx()).await {
+            if let Err(e) = guard.flush_autosave_on_shutdown().await {
+                eprintln!("Warning: Failed to flush session autosave: {e}");
+            }
         }
     }
 
