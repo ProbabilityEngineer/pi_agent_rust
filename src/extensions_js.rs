@@ -5278,14 +5278,11 @@ impl JsModuleResolver for PiJsResolver {
             state.repair_mode
         };
 
-        let (roots, canonical_roots) = {
+        let canonical_roots = {
             let state = self.state.borrow();
-            (
-                state.extension_roots.clone(),
-                state.canonical_extension_roots.clone(),
-            )
+            state.canonical_extension_roots.clone()
         };
-        if let Some(path) = resolve_module_path(base, spec, repair_mode, &roots, &canonical_roots) {
+        if let Some(path) = resolve_module_path(base, spec, repair_mode, &canonical_roots) {
             // Canonicalize to collapse `.` / `..` segments and normalise
             // separators (Windows backslashes → forward slashes for QuickJS).
             let canonical = crate::extensions::safe_canonicalize(&path);
@@ -5765,7 +5762,6 @@ fn resolve_module_path(
     base: &str,
     specifier: &str,
     repair_mode: RepairMode,
-    roots: &[PathBuf],
     canonical_roots: &[PathBuf],
 ) -> Option<PathBuf> {
     let specifier = specifier.trim();
@@ -5775,7 +5771,7 @@ fn resolve_module_path(
 
     if let Some(path) = specifier.strip_prefix("file://") {
         let resolved = resolve_existing_file(PathBuf::from(path))?;
-        if roots.is_empty() {
+        if canonical_roots.is_empty() {
             return None;
         }
         let canonical = crate::extensions::safe_canonicalize(&resolved);
@@ -5828,7 +5824,7 @@ fn resolve_module_path(
         // SEC-FIX: Enforce scope monotonicity on the *resolved* path (bd-k5q5.9.1.3).
         // This handles cases where `resolve_existing_module_candidate` finds a file
         // (e.g. .ts sibling) that is a symlink escaping the root, even if the base path was safe.
-        if roots.is_empty() {
+        if canonical_roots.is_empty() {
             return None;
         }
         let canonical_resolved = crate::extensions::safe_canonicalize(&resolved);
@@ -18982,7 +18978,6 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             base.to_string_lossy().as_ref(),
             "./pkg",
             mode,
-            &roots,
             &canonical_roots,
         )
         .expect("resolve ./pkg");
@@ -18992,7 +18987,6 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             base.to_string_lossy().as_ref(),
             "./module",
             mode,
-            &roots,
             &canonical_roots,
         )
         .expect("resolve ./module");
@@ -19002,7 +18996,6 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             base.to_string_lossy().as_ref(),
             "./only_json",
             mode,
-            &roots,
             &canonical_roots,
         )
         .expect("resolve ./only_json");
@@ -19013,7 +19006,6 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             base.to_string_lossy().as_ref(),
             &file_url,
             mode,
-            &roots,
             &canonical_roots,
         )
         .expect("file://");
@@ -19044,7 +19036,6 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             base.to_string_lossy().as_ref(),
             &file_url,
             mode,
-            &roots,
             &canonical_roots,
         );
         assert!(
@@ -19077,7 +19068,6 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             base.to_string_lossy().as_ref(),
             &file_url,
             mode,
-            &roots,
             &canonical_roots,
         );
         assert_eq!(resolved, Some(inside));
