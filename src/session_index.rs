@@ -570,6 +570,11 @@ fn file_stats(path: &Path) -> Result<(i64, u64)> {
 }
 
 fn is_session_file_path(path: &Path) -> bool {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with("session-index.") {
+            return false;
+        }
+    }
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("jsonl") => true,
         #[cfg(feature = "sqlite-sessions")]

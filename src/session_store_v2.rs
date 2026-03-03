@@ -486,18 +486,19 @@ impl SessionStoreV2 {
         let Some(row) = row else {
             return Ok(None);
         };
-        seek_read_frame(self, row)
+        SegmentFileReader::new(self).read_frame(row)
     }
 
     /// Read all entries with `entry_seq >= from_entry_seq` (tail reading).
     pub fn read_entries_from(&self, from_entry_seq: u64) -> Result<Vec<SegmentFrame>> {
         let index_rows = self.read_index()?;
         let mut frames = Vec::new();
+        let mut reader = SegmentFileReader::new(self);
         for row in &index_rows {
             if row.entry_seq < from_entry_seq {
                 continue;
             }
-            if let Some(frame) = seek_read_frame(self, row)? {
+            if let Some(frame) = reader.read_frame(row)? {
                 frames.push(frame);
             }
         }
@@ -515,8 +516,9 @@ impl SessionStoreV2 {
         let total = index_rows.len();
         let skip = total.saturating_sub(usize::try_from(count).unwrap_or(usize::MAX));
         let mut frames = Vec::with_capacity(total.saturating_sub(skip));
+        let mut reader = SegmentFileReader::new(self);
         for row in &index_rows[skip..] {
-            if let Some(frame) = seek_read_frame(self, row)? {
+            if let Some(frame) = reader.read_frame(row)? {
                 frames.push(frame);
             }
         }
@@ -534,13 +536,14 @@ impl SessionStoreV2 {
 
         let mut frames = Vec::new();
         let mut current_id: Option<String> = Some(leaf_entry_id.to_string());
+        let mut reader = SegmentFileReader::new(self);
         while let Some(ref entry_id) = current_id {
             let row = id_to_row.get(entry_id.as_str());
             let row = match row {
                 Some(r) => *r,
                 None => break,
             };
-            match seek_read_frame(self, row)? {
+            match reader.read_frame(row)? {
                 Some(frame) => {
                     current_id.clone_from(&frame.parent_entry_id);
                     frames.push(frame);
@@ -595,7 +598,7 @@ impl SessionStoreV2 {
             .root
             .join("tmp")
             .join(format!("{checkpoint_seq:016}.json.tmp"));
-        
+
         let write_result: Result<()> = (|| {
             let mut file = secure_open_options()
                 .create(true)
@@ -821,9 +824,10 @@ impl SessionStoreV2 {
 
         let mut recomputed_chain = GENESIS_CHAIN_HASH.to_string();
         let mut parent_links_closed = true;
+        let mut reader = SegmentFileReader::new(self);
 
         for row in &index_rows {
-            if let Some(frame) = seek_read_frame(self, row)? {
+            if let Some(frame) = reader.read_frame(row)? {
                 entry_ids.insert(frame.entry_id.clone());
 
                 if frame.entry_type == "message" {
@@ -922,7 +926,7 @@ impl SessionStoreV2 {
         manifest.integrity.manifest_hash = manifest_hash_hex(&manifest)?;
 
         let tmp = self.root.join("tmp").join("manifest.json.tmp");
-        
+
         let write_result: Result<()> = (|| {
             let mut file = secure_open_options()
                 .create(true)
@@ -1277,8 +1281,9 @@ impl SessionStoreV2 {
 
             let mut chain = GENESIS_CHAIN_HASH.to_string();
             let mut total = 0u64;
+            let mut reader = SegmentFileReader::new(self);
             for row in &index_rows {
-                let frame = seek_read_frame(self, row)?.ok_or_else(|| {
+                let frame = reader.read_frame(row)?.ok_or_else(|| {
                     Error::session(format!(
                         "index references missing frame during bootstrap: entry_seq={}, segment={}",
                         row.entry_seq, row.segment_seq
@@ -1394,45 +1399,70 @@ pub fn session_entry_to_frame_args(
     Ok((entry_id, parent_entry_id, entry_type.to_string(), payload))
 }
 
-/// Seek-read a single frame from a segment using an index row.
-fn seek_read_frame(store: &SessionStoreV2, row: &OffsetIndexEntry) -> Result<Option<SegmentFrame>> {
-    let segment_path = store.segment_file_path(row.segment_seq);
-    if !segment_path.exists() {
-        return Ok(None);
-    }
-    let mut file = File::open(&segment_path)?;
-    let file_len = file.metadata()?.len();
-    let end_offset = row
-        .byte_offset
-        .checked_add(row.byte_length)
-        .ok_or_else(|| Error::session("index byte range overflow"))?;
+/// Helper to cache the file descriptor when reading multiple frames sequentially.
+struct SegmentFileReader<'a> {
+    store: &'a SessionStoreV2,
+    current_segment_seq: u64,
+    current_file: Option<File>,
+    current_len: u64,
+}
 
-    if end_offset > file_len {
-        return Err(Error::session(format!(
-            "index out of bounds for segment {}: end={} len={}",
-            segment_path.display(),
-            end_offset,
-            file_len
-        )));
+impl<'a> SegmentFileReader<'a> {
+    const fn new(store: &'a SessionStoreV2) -> Self {
+        Self {
+            store,
+            current_segment_seq: 0,
+            current_file: None,
+            current_len: 0,
+        }
     }
 
-    file.seek(SeekFrom::Start(row.byte_offset))?;
-    let byte_len = usize::try_from(row.byte_length)
-        .map_err(|_| Error::session(format!("byte length too large: {}", row.byte_length)))?;
+    fn read_frame(&mut self, row: &OffsetIndexEntry) -> Result<Option<SegmentFrame>> {
+        if self.current_segment_seq != row.segment_seq || self.current_file.is_none() {
+            let path = self.store.segment_file_path(row.segment_seq);
+            if !path.exists() {
+                self.current_file = None;
+                return Ok(None);
+            }
+            let file = File::open(&path)?;
+            self.current_len = file.metadata()?.len();
+            self.current_file = Some(file);
+            self.current_segment_seq = row.segment_seq;
+        }
 
-    if row.byte_length > store.max_segment_bytes.max(100 * 1024 * 1024) {
-        return Err(Error::session(format!(
-            "frame byte length {byte_len} exceeds limit"
-        )));
-    }
+        let file = self.current_file.as_mut().unwrap();
+        let end_offset = row
+            .byte_offset
+            .checked_add(row.byte_length)
+            .ok_or_else(|| Error::session("index byte range overflow"))?;
 
-    let mut buf = vec![0u8; byte_len];
-    file.read_exact(&mut buf)?;
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
+        if end_offset > self.current_len {
+            return Err(Error::session(format!(
+                "index out of bounds for segment {}: end={} len={}",
+                self.store.segment_file_path(row.segment_seq).display(),
+                end_offset,
+                self.current_len
+            )));
+        }
+
+        file.seek(SeekFrom::Start(row.byte_offset))?;
+        let byte_len = usize::try_from(row.byte_length)
+            .map_err(|_| Error::session(format!("byte length too large: {}", row.byte_length)))?;
+
+        if row.byte_length > self.store.max_segment_bytes.max(100 * 1024 * 1024) {
+            return Err(Error::session(format!(
+                "frame byte length {byte_len} exceeds limit"
+            )));
+        }
+
+        let mut buf = vec![0u8; byte_len];
+        file.read_exact(&mut buf)?;
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        }
+        let frame: SegmentFrame = serde_json::from_slice(&buf)?;
+        Ok(Some(frame))
     }
-    let frame: SegmentFrame = serde_json::from_slice(&buf)?;
-    Ok(Some(frame))
 }
 
 /// Compute next hash chain value: `SHA-256(prev_chain_hex || payload_sha256_hex)`.

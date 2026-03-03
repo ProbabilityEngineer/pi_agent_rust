@@ -969,8 +969,18 @@ async fn run(
             .unwrap_or(true),
     )?;
 
-    let is_interactive = !cli.print && cli.mode.is_none();
-    let mode = cli.mode.clone().unwrap_or_else(|| "text".to_string());
+    let is_interactive = !cli.print && cli.mode.is_none() && cli.export.is_none();
+    let mode = cli.mode.clone().unwrap_or_else(|| {
+        if is_interactive {
+            "interactive".to_string()
+        } else {
+            "text".to_string()
+        }
+    });
+    let is_print_mode = mode == "text" || mode == "json";
+    if is_print_mode {
+        cli.no_session = true;
+    }
 
     let scoped_patterns = if let Some(models_arg) = &cli.models {
         pi::app::parse_models_arg(models_arg)
@@ -3472,7 +3482,9 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
                 // also accept manual paste from stdin.
                 let (manual_tx, manual_rx) = std::sync::mpsc::channel::<String>();
                 let prompt_thread = std::thread::spawn(move || {
-                    if let Ok(Some(line)) = prompt_line("Paste callback URL or code (or wait for browser): ") {
+                    if let Ok(Some(line)) =
+                        prompt_line("Paste callback URL or code (or wait for browser): ")
+                    {
                         let _ = manual_tx.send(line);
                     }
                 });
