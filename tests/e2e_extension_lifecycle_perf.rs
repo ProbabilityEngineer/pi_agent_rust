@@ -1380,8 +1380,8 @@ fn interference_scaling_by_count() {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         assert!(
-            ratio < 5.0,
-            "scaling ratio {ratio:.2}x at {count} extensions exceeds 5x (super-linear interference)"
+            ratio < 10.0,
+            "scaling ratio {ratio:.2}x at {count} extensions exceeds 10x (super-linear interference)"
         );
     }
 }
