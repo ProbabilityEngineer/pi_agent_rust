@@ -3538,7 +3538,10 @@ async fn run_bash_rpc(
     };
 
     // Drain remaining output
-    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    let now_drain = asupersync::Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .map_or_else(wall_now, |timer| timer.now());
+    let drain_deadline = now_drain + std::time::Duration::from_millis(2000);
     let mut drain_timed_out = false;
     loop {
         match rx.try_recv() {
@@ -3558,11 +3561,14 @@ async fn run_bash_rpc(
                 .await;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if Instant::now() >= drain_deadline {
+                let now = asupersync::Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(wall_now, |timer| timer.now());
+                if now >= drain_deadline {
                     drain_timed_out = true;
                     break;
                 }
-                sleep(wall_now(), tick).await;
+                sleep(now, tick).await;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }

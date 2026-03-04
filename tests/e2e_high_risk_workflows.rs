@@ -627,9 +627,12 @@ fn provider_mid_stream_error_handled_gracefully() {
         }
     });
 
-    let assistant_message = result.expect("Expected Ok from mid-stream failure with partial recovery");
+    let assistant_message =
+        result.expect("Expected Ok from mid-stream failure with partial recovery");
     assert_eq!(assistant_message.stop_reason, StopReason::Error);
-    let err_msg = assistant_message.error_message.expect("Expected error message");
+    let err_msg = assistant_message
+        .error_message
+        .expect("Expected error message");
     assert!(
         err_msg.contains("connection reset") || err_msg.contains("streaming"),
         "Error should describe the streaming failure: {err_msg}"

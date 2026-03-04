@@ -254,7 +254,7 @@ const fn calculate_context_tokens(usage: &Usage) -> u64 {
     if usage.total_tokens > 0 {
         usage.total_tokens
     } else {
-        usage.input + usage.output
+        usage.input.saturating_add(usage.output)
     }
 }
 
@@ -297,9 +297,9 @@ fn estimate_context_tokens(messages: &[SessionMessage]) -> ContextUsageEstimate 
     let trailing_tokens = messages[usage_index + 1..]
         .iter()
         .map(estimate_tokens)
-        .sum::<u64>();
+        .fold(0u64, |acc, val| acc.saturating_add(val));
     ContextUsageEstimate {
-        tokens: usage_tokens + trailing_tokens,
+        tokens: usage_tokens.saturating_add(trailing_tokens),
         last_usage_index: Some(usage_index),
     }
 }

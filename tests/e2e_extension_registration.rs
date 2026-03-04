@@ -605,7 +605,8 @@ fn e2e_shortcut_execute() {
             }
         });
 
-    let value = result.unwrap_or_else(|e| panic!("ctrl+e shortcut execution should succeed: {e:?}"));
+    let value =
+        result.unwrap_or_else(|e| panic!("ctrl+e shortcut execution should succeed: {e:?}"));
     assert_eq!(
         value.get("display").and_then(|v| v.as_str()),
         Some("Ctrl+E triggered")

@@ -721,7 +721,9 @@ impl AuthStorage {
 
         if needs_save {
             if let Err(e) = self.save_async().await {
-                tracing::warn!("Failed to save auth.json after refreshing extension OAuth tokens: {e}");
+                tracing::warn!(
+                    "Failed to save auth.json after refreshing extension OAuth tokens: {e}"
+                );
             }
         }
 

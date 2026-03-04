@@ -68,8 +68,8 @@ impl ContentionSample {
         if total == 0 {
             return 0;
         }
-        let numerator = self.read_acquires.saturating_mul(1_000);
-        let ratio = numerator / total;
+        let numerator = u128::from(self.read_acquires) * 1_000;
+        let ratio = numerator / u128::from(total);
         u32::try_from(ratio).unwrap_or(1_000)
     }
 }

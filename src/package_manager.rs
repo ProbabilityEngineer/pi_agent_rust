@@ -932,10 +932,14 @@ impl PackageManager {
         }
 
         let payload = serde_json::to_string(event)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(path)?;
         writeln!(file, "{payload}")?;
         Ok(())
     }

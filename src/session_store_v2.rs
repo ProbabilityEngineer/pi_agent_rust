@@ -1271,8 +1271,7 @@ impl SessionStoreV2 {
                 .ok_or_else(|| Error::session("frame sequence overflow while bootstrapping"))?;
             let segment_path = self.segment_file_path(last.segment_seq);
             let expected_segment_bytes = last.byte_offset.saturating_add(last.byte_length);
-            let actual_segment_bytes = fs::metadata(&segment_path)
-                .map_or(0, |meta| meta.len());
+            let actual_segment_bytes = fs::metadata(&segment_path).map_or(0, |meta| meta.len());
 
             if actual_segment_bytes > expected_segment_bytes {
                 tracing::warn!(

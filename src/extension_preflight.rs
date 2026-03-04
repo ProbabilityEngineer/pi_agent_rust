@@ -195,7 +195,9 @@ impl ConfidenceScore {
     /// Compute from error/warning counts.
     #[must_use]
     pub fn from_counts(errors: usize, warnings: usize) -> Self {
-        let penalty = errors.saturating_mul(25) + warnings.saturating_mul(10);
+        let penalty = errors
+            .saturating_mul(25)
+            .saturating_add(warnings.saturating_mul(10));
         let score = 100_usize.saturating_sub(penalty);
         Self(u8::try_from(score.min(100)).unwrap_or(0))
     }
@@ -2254,13 +2256,19 @@ impl InstallTimeRiskReport {
 
         // Composite risk score: 0 = maximum risk, 100 = clean.
         // Start from 100 and apply deductions.
-        let security_deduction = security.tier_counts.critical.saturating_mul(30)
-            + security.tier_counts.high.saturating_mul(20)
-            + security.tier_counts.medium.saturating_mul(10)
-            + security.tier_counts.low.saturating_mul(3);
-        let preflight_deduction = preflight.summary.errors.saturating_mul(15)
-            + preflight.summary.warnings.saturating_mul(5);
-        let total_deduction = security_deduction + preflight_deduction;
+        let security_deduction = security
+            .tier_counts
+            .critical
+            .saturating_mul(30)
+            .saturating_add(security.tier_counts.high.saturating_mul(20))
+            .saturating_add(security.tier_counts.medium.saturating_mul(10))
+            .saturating_add(security.tier_counts.low.saturating_mul(3));
+        let preflight_deduction = preflight
+            .summary
+            .errors
+            .saturating_mul(15)
+            .saturating_add(preflight.summary.warnings.saturating_mul(5));
+        let total_deduction = security_deduction.saturating_add(preflight_deduction);
         let composite_risk_score =
             u8::try_from(100_usize.saturating_sub(total_deduction).min(100)).unwrap_or(0);
 

@@ -106,6 +106,8 @@ impl GoldenTestHarness {
         let _ = fs::create_dir_all(&env_root);
 
         // Fully isolate global/project state for determinism.
+        env.insert("HOME".to_string(), env_root.display().to_string());
+        env.insert("USERPROFILE".to_string(), env_root.display().to_string());
         env.insert(
             "PI_CODING_AGENT_DIR".to_string(),
             env_root.join("agent").display().to_string(),

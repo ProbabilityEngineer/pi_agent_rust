@@ -1873,9 +1873,12 @@ pub(crate) async fn run_bash_command(
 
     let mut timed_out = false;
     let mut exit_code: Option<i32> = None;
-    let start = Instant::now();
+    let start = AgentCx::for_current_or_request()
+        .cx()
+        .timer_driver()
+        .map_or_else(wall_now, |timer| timer.now());
     let timeout = timeout_secs.map(Duration::from_secs);
-    let mut terminate_deadline: Option<Instant> = None;
+    let mut terminate_deadline: Option<asupersync::Time> = None;
 
     let tick = Duration::from_millis(10);
     loop {
@@ -1898,8 +1901,13 @@ pub(crate) async fn run_bash_command(
             Err(err) => return Err(Error::tool("bash", err.to_string())),
         }
 
+        let now = AgentCx::for_current_or_request()
+            .cx()
+            .timer_driver()
+            .map_or_else(wall_now, |timer| timer.now());
+
         if let Some(deadline) = terminate_deadline {
-            if Instant::now() >= deadline {
+            if now >= deadline {
                 if let Some(status) = guard
                     .kill()
                     .map_err(|err| Error::tool("bash", format!("Failed to kill process: {err}")))?
@@ -1909,36 +1917,34 @@ pub(crate) async fn run_bash_command(
                 break; // Guard now owns no child after kill()
             }
         } else if let Some(timeout) = timeout {
-            if start.elapsed() >= timeout {
+            let elapsed = std::time::Duration::from_millis(now.duration_since(start));
+            if elapsed >= timeout {
                 timed_out = true;
                 let pid = guard.child.as_ref().map(std::process::Child::id);
                 terminate_process_tree(pid);
-                terminate_deadline =
-                    Some(Instant::now() + Duration::from_secs(BASH_TERMINATE_GRACE_SECS));
+                terminate_deadline = Some(now + Duration::from_secs(BASH_TERMINATE_GRACE_SECS));
             }
         }
 
-        // Use the runtime's timer driver when available (virtual/lab time),
-        // otherwise fall back to wall clock.
-        let now = AgentCx::for_current_or_request()
-            .cx()
-            .timer_driver()
-            .map_or_else(wall_now, |timer| timer.now());
         sleep(now, tick).await;
     }
 
-    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    let now_drain = AgentCx::for_current_or_request()
+        .cx()
+        .timer_driver()
+        .map_or_else(wall_now, |timer| timer.now());
+    let drain_deadline = now_drain + Duration::from_secs(2);
     loop {
         match rx.try_recv() {
             Ok(chunk) => ingest_bash_chunk(chunk, &mut bash_output).await?,
             Err(mpsc::TryRecvError::Empty) => {
-                if Instant::now() >= drain_deadline {
-                    break;
-                }
                 let now = AgentCx::for_current_or_request()
                     .cx()
                     .timer_driver()
                     .map_or_else(wall_now, |timer| timer.now());
+                if now >= drain_deadline {
+                    break;
+                }
                 sleep(now, tick).await;
             }
             Err(mpsc::TryRecvError::Disconnected) => break,

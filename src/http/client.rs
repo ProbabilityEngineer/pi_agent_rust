@@ -35,7 +35,7 @@ fn default_request_timeout_from_env() -> Option<std::time::Duration> {
         // from instantly fast-forwarding and failing mock server requests.
         return None;
     }
-    
+
     #[cfg(not(test))]
     {
         static REQUEST_TIMEOUT: OnceLock<Option<std::time::Duration>> = OnceLock::new();
@@ -214,7 +214,7 @@ impl<'a> RequestBuilder<'a> {
             let asupersync_now = asupersync::Cx::current()
                 .and_then(|cx| cx.timer_driver())
                 .map_or_else(wall_now, |timer| timer.now());
-            
+
             let sleep_fut = sleep(asupersync_now, duration).fuse();
             let send_fut = send_fut.fuse();
             futures::pin_mut!(sleep_fut, send_fut);
@@ -223,7 +223,12 @@ impl<'a> RequestBuilder<'a> {
                 Either::Left((res, _)) => res?,
                 Either::Right(_) => return Err(Error::api("Request timed out")),
             };
-            (status, response_headers, stream, Some((asupersync_now, duration)))
+            (
+                status,
+                response_headers,
+                stream,
+                Some((asupersync_now, duration)),
+            )
         } else {
             let (status, response_headers, stream) = send_fut.await?;
             (status, response_headers, stream, None)
@@ -357,8 +362,9 @@ impl Response {
             let asupersync_now = asupersync::Cx::current()
                 .and_then(|cx| cx.timer_driver())
                 .map_or_else(wall_now, |timer| timer.now());
-            
-            let elapsed = std::time::Duration::from_millis(asupersync_now.duration_since(start_time));
+
+            let elapsed =
+                std::time::Duration::from_millis(asupersync_now.duration_since(start_time));
             if elapsed >= timeout {
                 return Err(Error::api("Request timed out reading body"));
             }
@@ -1311,10 +1317,10 @@ mod tests {
     fn response_accessors() {
         let response = Response {
             status: 200,
-                headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-                stream: Box::pin(futures::stream::empty()),
-                timeout_info: None,
-            };
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            stream: Box::pin(futures::stream::empty()),
+            timeout_info: None,
+        };
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers().len(), 1);
         assert_eq!(response.headers()[0].0, "Content-Type");
