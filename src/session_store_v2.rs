@@ -715,6 +715,9 @@ impl SessionStoreV2 {
 
             let index_path = self.index_file_path();
             let index_tmp = self.root.join("tmp").join("offsets.rollback.tmp");
+            if let Some(parent) = index_tmp.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
             write_jsonl_lines(&index_tmp, &index_rows)?;
             fs::rename(index_tmp, index_path)?;
 
@@ -1079,7 +1082,7 @@ impl SessionStoreV2 {
                         frame
                     }
                     Err(err) => {
-                        let at_eof = reader.fill_buf().map(|b| b.is_empty()).unwrap_or(false);
+                        let at_eof = reader.fill_buf().is_ok_and(<[u8]>::is_empty);
                         tracing::warn!(
                             segment = %seg_path.display(),
                             line_number,

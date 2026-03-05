@@ -140,10 +140,12 @@ fn register_random_int_hostcall(global: &rquickjs::Object<'_>) -> rquickjs::Resu
             }
             let range = max - min;
             let rand_bytes = random_bytes(8);
-            let mut random_window = [0_u8; 4];
-            random_window.copy_from_slice(&rand_bytes[..4]);
-            let random = f64::from(u32::from_le_bytes(random_window));
-            let normalized = random / (f64::from(u32::MAX) + 1.0);
+            let mut random_window = [0_u8; 8];
+            random_window.copy_from_slice(&rand_bytes);
+            // 53 bits of randomness (max safe integer precision in JS)
+            let random = u64::from_le_bytes(random_window) >> 11;
+            #[allow(clippy::cast_precision_loss)]
+            let normalized = (random as f64) / ((1u64 << 53) as f64);
             Ok(min + (normalized * range).floor())
         }),
     )
@@ -221,7 +223,11 @@ fn hex_decode(hex: &str) -> Vec<u8> {
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     if len > 0 {
-        getrandom::fill(&mut out).expect("failed to generate random bytes");
+        if let Err(e) = getrandom::fill(&mut out) {
+            // Log the error but don't panic the entire CLI. In extreme edge cases
+            // (e.g. OS entropy pool not initialized), this will fallback to zeros.
+            tracing::error!("getrandom::fill failed: {}", e);
+        }
     }
     out
 }

@@ -303,7 +303,7 @@ fn print_error_with_hints(err: &anyhow::Error) {
         }
     }
 
-    eprintln!("{err}");
+    eprintln!("{err:?}");
 }
 
 fn exit_code_for_error(err: &anyhow::Error) -> i32 {
@@ -3504,7 +3504,11 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
                     if let Ok(line) = manual_rx.try_recv() {
                         break line;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    asupersync::time::sleep(
+                        asupersync::time::wall_now(),
+                        std::time::Duration::from_millis(50),
+                    )
+                    .await;
                 };
 
                 // Don't wait for the prompt thread — it will exit on its own

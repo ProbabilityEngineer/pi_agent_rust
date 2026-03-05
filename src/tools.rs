@@ -4615,7 +4615,10 @@ async fn get_file_lines_async<'a>(
         let bytes = asupersync::fs::read(path).await.unwrap_or_default();
         let content = String::from_utf8_lossy(&bytes).to_string();
         let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-        let lines: Vec<String> = normalized.split('\n').map(str::to_string).collect();
+        let mut lines: Vec<String> = normalized.split('\n').map(str::to_string).collect();
+        if normalized.ends_with('\n') {
+            lines.pop();
+        }
         cache.insert(path.to_path_buf(), lines);
     }
     cache.get(path).unwrap().as_slice()
