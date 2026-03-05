@@ -194,6 +194,13 @@ HELP
     help_inconclusive_probe_ok)
       cat <<'HELP'
 Usage: pi [OPTIONS] [ARGS]... [COMMAND]
+This build omits the command table from --help output.
+HELP
+      exit 0
+      ;;
+    help_conclusive_no_completion)
+      cat <<'HELP'
+Usage: pi [OPTIONS] [ARGS]... [COMMAND]
 
 Commands:
   help  Print this message
@@ -263,6 +270,10 @@ if [ "\${1:-}" = "completions" ]; then
           ;;
       esac
       ;;
+    help_conclusive_no_completion)
+      sleep "\${STUB_COMPLETION_SLEEP_SECS:-30}"
+      exit 1
+      ;;
     completion_hang)
       sleep "\${STUB_COMPLETION_SLEEP_SECS:-30}"
       echo "# delayed completion output"
@@ -281,6 +292,9 @@ fi
 if [ "\${1:-}" = "completion" ]; then
   if [ "\${2:-}" = "--help" ]; then
     if [ "\${MODE}" = "completion_probe_hang" ]; then
+      sleep "\${STUB_COMPLETION_SLEEP_SECS:-30}"
+    fi
+    if [ "\${MODE}" = "help_conclusive_no_completion" ]; then
       sleep "\${STUB_COMPLETION_SLEEP_SECS:-30}"
     fi
     exit 1
@@ -1442,6 +1456,31 @@ test_completions_help_inconclusive_falls_back_to_probe() {
   [ -f "$completion_file" ] || { echo "expected completion file: ${completion_file}" >&2; return 1; }
 }
 
+test_completions_help_conclusive_no_command_skips_fast() {
+  local dir artifact artifact_url checksum
+  dir="$(case_dir "completions-help-conclusive-no-command")"
+  write_existing_pi_stub "$dir"
+
+  artifact="${dir}/fixtures/pi-fixture"
+  write_artifact_binary "$artifact" "help_conclusive_no_completion"
+  artifact_url="file://${artifact}"
+  checksum="$(sha256_file "$artifact")"
+
+  PI_INSTALLER_COMPLETION_PROBE_TIMEOUT=1 \
+  STUB_COMPLETION_SLEEP_SECS=3 \
+  run_installer "$dir" \
+    --yes --no-gum --offline \
+    --version v9.9.9 \
+    --dest "${dir}/dest" \
+    --artifact-url "${artifact_url}" \
+    --checksum "${checksum}" \
+    --completions bash
+
+  assert_exit_code "$dir" 0
+  assert_output_contains "$dir" "Shell completions: skipped (binary has no completion subcommand)"
+  assert_output_contains "$dir" "Shell:     skipped (unsupported by this pi build)"
+}
+
 test_completions_probe_timeout_is_non_fatal() {
   local dir artifact artifact_url checksum
   dir="$(case_dir "completions-probe-timeout")"
@@ -1533,6 +1572,7 @@ main() {
   run_test test_completions_success_writes_file
   run_test test_completions_help_discovery_path_succeeds
   run_test test_completions_help_inconclusive_falls_back_to_probe
+  run_test test_completions_help_conclusive_no_command_skips_fast
   run_test test_completions_probe_timeout_is_non_fatal
   run_test test_completions_generation_timeout_is_non_fatal
 

@@ -1877,7 +1877,11 @@ install_completions_for_shell() {
       subcommand="completions"
     elif printf '%s\n' "$root_help" | grep -Eq '^[[:space:]]+completion([[:space:]]|$)'; then
       subcommand="completion"
+    elif printf '%s\n' "$root_help" | grep -Eq '^[[:space:]]*Commands:'; then
+      # Help output is conclusive and lists no completion command.
+      should_probe_subcommands=0
     else
+      # Help output was available but inconclusive for command discovery.
       should_probe_subcommands=1
     fi
   else
