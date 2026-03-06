@@ -2154,8 +2154,8 @@ fn stream_contract_violation_after_retries_is_fatal() {
             .filter(|m| matches!(m, Message::Assistant(_)))
             .count();
         assert_eq!(
-            assistant_count, 0,
-            "empty-stream contract violation should not leave assistant messages"
+            assistant_count, 3,
+            "each failed attempt leaves an error assistant message in the manual continue loop"
         );
         let user_count = agent_session
             .agent
