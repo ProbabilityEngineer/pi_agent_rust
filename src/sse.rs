@@ -111,6 +111,21 @@ impl SseParser {
         }
     }
 
+    #[inline]
+    fn reset_current_for_next_event(current: &mut SseEvent) {
+        current.event = Cow::Borrowed("message");
+        current.data.clear();
+    }
+
+    #[inline]
+    fn carry_forward_event_state(current: &SseEvent) -> SseEvent {
+        SseEvent {
+            id: current.id.clone(),
+            retry: current.retry,
+            ..Default::default()
+        }
+    }
+
     /// Process complete lines from `source`, dispatching events via `emit`.
     /// Returns the byte offset of the first unconsumed byte.
     #[inline]
@@ -184,12 +199,12 @@ impl SseParser {
                     if current.event.is_empty() {
                         current.event = Cow::Borrowed("message");
                     }
+                    let next_event = Self::carry_forward_event_state(current);
                     emit(std::mem::take(current));
-                    *current = SseEvent::default();
+                    *current = next_event;
                     *has_data = false;
                 } else {
-                    current.event = Cow::Borrowed("message");
-                    current.data.clear();
+                    Self::reset_current_for_next_event(current);
                 }
             } else {
                 Self::process_line(line, current, has_data);
@@ -301,6 +316,8 @@ pub struct SseStream<S> {
     parser: SseParser,
     pending_events: VecDeque<SseEvent>,
     pending_error: Option<std::io::Error>,
+    pending_error_is_terminal: bool,
+    terminated: bool,
     utf8_buffer: Vec<u8>,
 }
 
@@ -312,6 +329,8 @@ impl<S> SseStream<S> {
             parser: SseParser::new(),
             pending_events: VecDeque::new(),
             pending_error: None,
+            pending_error_is_terminal: false,
+            terminated: false,
             utf8_buffer: Vec::new(),
         }
     }
@@ -449,7 +468,17 @@ where
             return Poll::Ready(Some(Ok(event)));
         }
         if let Some(err) = self.pending_error.take() {
+            if self.pending_error_is_terminal {
+                self.pending_error_is_terminal = false;
+                self.pending_events.clear();
+                self.utf8_buffer.clear();
+                self.parser = SseParser::new();
+                self.terminated = true;
+            }
             return Poll::Ready(Some(Err(err)));
+        }
+        if self.terminated {
+            return Poll::Ready(None);
         }
 
         loop {
@@ -458,8 +487,13 @@ where
                     if let Err(err) = self.process_chunk(&bytes) {
                         if let Some(event) = self.pending_events.pop_front() {
                             self.pending_error = Some(err);
+                            self.pending_error_is_terminal = true;
                             return Poll::Ready(Some(Ok(event)));
                         }
+                        self.pending_events.clear();
+                        self.utf8_buffer.clear();
+                        self.parser = SseParser::new();
+                        self.terminated = true;
                         return Poll::Ready(Some(Err(err)));
                     }
 
@@ -835,6 +869,16 @@ mod tests {
     }
 
     #[test]
+    fn test_last_event_id_persists_across_dispatched_events() {
+        let mut parser = SseParser::new();
+        let events = parser.feed("id: 123\ndata: first\n\ndata: second\n\n");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id.as_deref(), Some("123"));
+        assert_eq!(events[1].id.as_deref(), Some("123"));
+        assert_eq!(events[1].data, "second");
+    }
+
+    #[test]
     fn test_multiple_events() {
         let mut parser = SseParser::new();
         let events = parser.feed("data: first\n\ndata: second\n\n");
@@ -875,6 +919,15 @@ mod tests {
         let events = parser.feed("retry: 3000\ndata: test\n\n");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].retry, Some(3000));
+    }
+
+    #[test]
+    fn test_retry_hint_persists_across_dispatched_events() {
+        let mut parser = SseParser::new();
+        let events = parser.feed("retry: 3000\ndata: first\n\ndata: second\n\n");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].retry, Some(3000));
+        assert_eq!(events[1].retry, Some(3000));
     }
 
     #[test]
@@ -1207,6 +1260,27 @@ data: {"type":"message_stop"}
             // 3. Error — surfaces after all pending events are delivered
             let err = stream.next().await.expect("3").expect_err("error");
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        });
+    }
+
+    #[test]
+    fn test_stream_does_not_flush_partial_tail_after_utf8_error() {
+        let mut bytes = b"data: ok\n\n".to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b"data: partial");
+
+        let mut stream = SseStream::new(stream::iter(vec![Ok(bytes)]));
+
+        futures::executor::block_on(async {
+            let first = stream.next().await.expect("1").expect("ok");
+            assert_eq!(first.data, "ok");
+
+            let err = stream.next().await.expect("2").expect_err("error");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            assert!(
+                stream.next().await.is_none(),
+                "utf-8 parse errors should terminate the stream without flushing a partial tail"
+            );
         });
     }
 
