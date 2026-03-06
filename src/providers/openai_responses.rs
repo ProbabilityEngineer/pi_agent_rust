@@ -167,12 +167,12 @@ impl OpenAIResponsesProvider {
 fn bearer_token_from_authorization_header(value: &str) -> Option<String> {
     let mut parts = value.split_whitespace();
     let scheme = parts.next()?;
-    let token = parts.next()?;
+    let bearer_value = parts.next()?;
     if parts.next().is_some() {
         return None;
     }
-    if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {
-        Some(token.trim().to_string())
+    if scheme.eq_ignore_ascii_case("bearer") && !bearer_value.trim().is_empty() {
+        Some(bearer_value.trim().to_string())
     } else {
         None
     }
@@ -241,7 +241,7 @@ impl Provider for OpenAIResponsesProvider {
         }
 
         if self.codex_mode {
-            let codex_token  = authorization_header_value
+            let codex_bearer = authorization_header_value
                 .as_deref()
                 .and_then(bearer_token_from_authorization_header)
                 .or_else(|| auth_value.clone())
@@ -251,7 +251,7 @@ impl Provider for OpenAIResponsesProvider {
                         "OpenAI Codex mode requires a Bearer token. Provide one via /login openai-codex or an Authorization: Bearer <token> header.",
                     )
                 })?;
-            let account_id = extract_chatgpt_account_id(&codex_token).ok_or_else(|| {
+            let account_id = extract_chatgpt_account_id(&codex_bearer).ok_or_else(|| {
                 Error::provider(
                     self.name(),
                     "Invalid OpenAI Codex OAuth token (missing chatgpt_account_id claim). Run /login openai-codex again.",
@@ -767,39 +767,56 @@ where
         }
     }
 
+    fn push_terminal_content_end_events(&mut self) {
+        for (content_index, block) in self.partial.content.iter().enumerate() {
+            match block {
+                ContentBlock::Text(t) => {
+                    self.pending_events.push_back(StreamEvent::TextEnd {
+                        content_index,
+                        content: t.text.clone(),
+                    });
+                }
+                ContentBlock::Thinking(t) => {
+                    self.pending_events.push_back(StreamEvent::ThinkingEnd {
+                        content_index,
+                        content: t.thinking.clone(),
+                    });
+                }
+                ContentBlock::Image(_) | ContentBlock::ToolCall(_) => {}
+            }
+        }
+    }
+
+    fn open_tool_call_snapshots_in_content_order(&self) -> Vec<(String, String, String, String)> {
+        let mut open_tool_calls: Vec<(usize, String, String, String, String)> = self
+            .tool_calls_by_item_id
+            .iter()
+            .map(|(item_id, tc)| {
+                (
+                    tc.content_index,
+                    item_id.clone(),
+                    tc.call_id.clone(),
+                    tc.name.clone(),
+                    tc.arguments.clone(),
+                )
+            })
+            .collect();
+        open_tool_calls.sort_by_key(|(content_index, ..)| *content_index);
+        open_tool_calls
+            .into_iter()
+            .map(|(_, item_id, call_id, name, arguments)| (item_id, call_id, name, arguments))
+            .collect()
+    }
+
     fn finish(&mut self, incomplete_reason: Option<String>) {
         if self.finished {
             return;
         }
 
-        // Emit TextEnd for all open text blocks
-        for idx in self.text_blocks.values() {
-            if let Some(ContentBlock::Text(t)) = self.partial.content.get(*idx) {
-                self.pending_events.push_back(StreamEvent::TextEnd {
-                    content_index: *idx,
-                    content: t.text.clone(),
-                });
-            }
-        }
-
-        // Emit ThinkingEnd for all open reasoning blocks
-        for idx in self.reasoning_blocks.values() {
-            if let Some(ContentBlock::Thinking(t)) = self.partial.content.get(*idx) {
-                self.pending_events.push_back(StreamEvent::ThinkingEnd {
-                    content_index: *idx,
-                    content: t.thinking.clone(),
-                });
-            }
-        }
+        self.push_terminal_content_end_events();
 
         // Best-effort: close any tool calls we didn't see "done" for.
-        let ids: Vec<String> = self.tool_calls_by_item_id.keys().cloned().collect();
-        for id in ids {
-            // Clone metadata first (end_tool_call removes the state).
-            let (call_id, name, arguments) = match self.tool_calls_by_item_id.get(&id) {
-                Some(tc) => (tc.call_id.clone(), tc.name.clone(), tc.arguments.clone()),
-                None => continue,
-            };
+        for (id, call_id, name, arguments) in self.open_tool_call_snapshots_in_content_order() {
             self.end_tool_call(&id, &call_id, &name, &arguments);
         }
 
@@ -1554,6 +1571,120 @@ mod tests {
     }
 
     #[test]
+    fn test_finish_emits_terminal_block_end_events_in_content_order() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async move {
+            let byte_stream = stream::iter(vec![Ok(Vec::new())]);
+            let event_source = crate::sse::SseStream::new(Box::pin(byte_stream));
+            let mut state = StreamState::new(
+                event_source,
+                "gpt-test".to_string(),
+                "openai-responses".to_string(),
+                "openai".to_string(),
+            );
+
+            state
+                .process_event(
+                    &json!({
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_1",
+                        "content_index": 0,
+                        "delta": "hello",
+                    })
+                    .to_string(),
+                )
+                .expect("text delta");
+            state
+                .process_event(
+                    &json!({
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": "rs_1",
+                        "summary_index": 0,
+                        "delta": "think",
+                    })
+                    .to_string(),
+                )
+                .expect("reasoning delta");
+            state
+                .process_event(
+                    &json!({
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_2",
+                        "content_index": 0,
+                        "delta": "world",
+                    })
+                    .to_string(),
+                )
+                .expect("second text delta");
+
+            state.finish(None);
+
+            let terminal_end_kinds: Vec<(&'static str, usize)> = state
+                .pending_events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::TextEnd { content_index, .. } => Some(("text", *content_index)),
+                    StreamEvent::ThinkingEnd { content_index, .. } => {
+                        Some(("thinking", *content_index))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(
+                terminal_end_kinds,
+                vec![("text", 0), ("thinking", 1), ("text", 2)]
+            );
+        });
+    }
+
+    #[test]
+    fn test_open_tool_call_snapshots_sort_by_content_index() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async move {
+            let byte_stream = stream::iter(vec![Ok(Vec::new())]);
+            let event_source = crate::sse::SseStream::new(Box::pin(byte_stream));
+            let mut state = StreamState::new(
+                event_source,
+                "gpt-test".to_string(),
+                "openai-responses".to_string(),
+                "openai".to_string(),
+            );
+
+            state.tool_calls_by_item_id.insert(
+                "late".to_string(),
+                ToolCallState {
+                    content_index: 4,
+                    call_id: "call-late".to_string(),
+                    name: "later".to_string(),
+                    arguments: "{\"b\":2}".to_string(),
+                },
+            );
+            state.tool_calls_by_item_id.insert(
+                "early".to_string(),
+                ToolCallState {
+                    content_index: 1,
+                    call_id: "call-early".to_string(),
+                    name: "earlier".to_string(),
+                    arguments: "{\"a\":1}".to_string(),
+                },
+            );
+
+            let ordered_ids: Vec<String> = state
+                .open_tool_call_snapshots_in_content_order()
+                .into_iter()
+                .map(|(item_id, ..)| item_id)
+                .collect();
+
+            assert_eq!(ordered_ids, vec!["early".to_string(), "late".to_string()]);
+        });
+    }
+
+    #[test]
     fn test_stream_sets_bearer_auth_header() {
         let captured = run_stream_and_capture_headers().expect("captured request");
         assert_eq!(
@@ -1587,8 +1718,8 @@ mod tests {
 
     #[test]
     fn test_bearer_token_parser_accepts_case_insensitive_scheme() {
-        let token = super::bearer_token_from_authorization_header("bEaReR abc.def.ghi");
-        assert_eq!(token.as_deref(), Some("abc.def.ghi"));
+        let parsed_bearer = super::bearer_token_from_authorization_header("bEaReR abc.def.ghi");
+        assert_eq!(parsed_bearer.as_deref(), Some("abc.def.ghi"));
         assert!(super::bearer_token_from_authorization_header("Basic abc").is_none());
         assert!(super::bearer_token_from_authorization_header("Bearer").is_none());
     }
@@ -1609,9 +1740,9 @@ mod tests {
             })],
             Vec::new(),
         );
-        let token = build_test_jwt("acct_test_123");
+        let test_jwt = build_test_jwt("acct_test_123");
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+        headers.insert("Authorization".to_string(), format!("Bearer {test_jwt}"));
         let options = StreamOptions {
             headers,
             session_id: Some("session-abc".to_string()),
@@ -1631,7 +1762,7 @@ mod tests {
         });
 
         let captured = rx.recv_timeout(Duration::from_secs(2)).expect("captured");
-        let expected_auth = format!("Bearer {token}");
+        let expected_auth = format!("Bearer {test_jwt}");
         assert_eq!(
             captured.headers.get("authorization").map(String::as_str),
             Some(expected_auth.as_str())
