@@ -30,7 +30,12 @@ pub(super) fn parse_quoted_file_ref(text: &str, start: usize) -> Option<(String,
 
     for (offset, ch) in text[after_quote..].char_indices() {
         if escaped {
-            path.push(ch);
+            if ch == quote || ch == '\\' {
+                path.push(ch);
+            } else {
+                path.push('\\');
+                path.push(ch);
+            }
             escaped = false;
             continue;
         }
@@ -165,6 +170,30 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+
+    #[test]
+    fn parse_quoted_file_ref_preserves_windows_path_separators() {
+        let text = "\"C:\\Program Files\\Pi\\agent.rs\".";
+        let parsed = parse_quoted_file_ref(text, 0);
+        assert_eq!(
+            parsed,
+            Some((
+                "C:\\Program Files\\Pi\\agent.rs".to_string(),
+                ".".to_string(),
+                text.len()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_quoted_file_ref_unescapes_only_quote_and_backslash() {
+        let text = "\"foo\\\\bar\\\"baz.txt\"";
+        let parsed = parse_quoted_file_ref(text, 0);
+        assert_eq!(
+            parsed,
+            Some(("foo\\bar\"baz.txt".to_string(), "".to_string(), text.len()))
+        );
+    }
 
     #[test]
     fn strip_wrapping_quotes_double() {
