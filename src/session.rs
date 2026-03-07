@@ -1663,9 +1663,7 @@ impl Session {
                             self.appends_since_checkpoint = 0;
                             Ok(())
                         }
-                        Err((err, _)) => {
-                            Err(err)
-                        }
+                        Err(err) => Err(err),
                     }?;
                 } else {
                     let message_count = self.cached_message_count;
