@@ -107,7 +107,7 @@ impl ResolveRoots {
     #[must_use]
     pub fn from_env(cwd: &Path) -> Self {
         Self {
-            global_settings_path: global_settings_path(),
+            global_settings_path: global_settings_path(cwd),
             project_settings_path: project_settings_path(cwd),
             global_base_dir: Config::global_dir(),
             project_base_dir: cwd.join(Config::project_dir()),
@@ -421,7 +421,7 @@ impl PackageManager {
     }
 
     fn list_packages_sync(&self) -> Result<Vec<PackageEntry>> {
-        let global = list_packages_in_settings(&global_settings_path())?
+        let global = list_packages_in_settings(&global_settings_path(&self.cwd))?
             .into_iter()
             .map(|mut p| {
                 p.scope = PackageScope::User;
@@ -735,7 +735,7 @@ impl PackageManager {
 
     fn add_package_source_sync(&self, source: &str, scope: PackageScope) -> Result<()> {
         let path = match scope {
-            PackageScope::User => global_settings_path(),
+            PackageScope::User => global_settings_path(&self.cwd),
             PackageScope::Project => project_settings_path(&self.cwd),
             PackageScope::Temporary => {
                 return Err(Error::config(
@@ -764,7 +764,7 @@ impl PackageManager {
 
     fn remove_package_source_sync(&self, source: &str, scope: PackageScope) -> Result<()> {
         let path = match scope {
-            PackageScope::User => global_settings_path(),
+            PackageScope::User => global_settings_path(&self.cwd),
             PackageScope::Project => project_settings_path(&self.cwd),
             PackageScope::Temporary => {
                 return Err(Error::config(
@@ -3453,11 +3453,9 @@ fn collect_digest_files_recursive(
     Ok(())
 }
 
-fn global_settings_path() -> PathBuf {
-    if let Ok(path) = std::env::var("PI_CONFIG_PATH") {
-        return PathBuf::from(path);
-    }
-    Config::global_dir().join("settings.json")
+fn global_settings_path(cwd: &Path) -> PathBuf {
+    Config::config_path_override_from_env(cwd)
+        .unwrap_or_else(|| Config::global_dir().join("settings.json"))
 }
 
 fn project_settings_path(cwd: &Path) -> PathBuf {

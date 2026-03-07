@@ -2425,15 +2425,18 @@ fn collect_config_packages_blocking(
 }
 
 fn build_config_report(cwd: &Path, packages: &[ConfigPackageState]) -> ConfigReport {
-    let config_path = std::env::var("PI_CONFIG_PATH")
-        .ok()
-        .map_or_else(|| Config::global_dir().join("settings.json"), PathBuf::from);
+    let global_dir = Config::global_dir();
+    let config_override_path = Config::config_path_override_from_env(cwd);
+    let config_path = config_override_path
+        .clone()
+        .unwrap_or_else(|| global_dir.join("settings.json"));
     let project_path = cwd.join(Config::project_dir()).join("settings.json");
 
-    let (config_valid, config_error) = match Config::load() {
-        Ok(_) => (true, None),
-        Err(err) => (false, Some(err.to_string())),
-    };
+    let (config_valid, config_error) =
+        match Config::load_with_roots(config_override_path.as_deref(), &global_dir, cwd) {
+            Ok(_) => (true, None),
+            Err(err) => (false, Some(err.to_string())),
+        };
 
     let packages = packages
         .iter()

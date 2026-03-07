@@ -1121,7 +1121,7 @@ fn check_extension(
         return Ok(());
     }
 
-    let config_path = std::env::var_os("PI_CONFIG_PATH").map(PathBuf::from);
+    let config_path = Config::config_path_override_from_env(cwd);
     let resolved = match Config::load_with_roots(config_path.as_deref(), &Config::global_dir(), cwd)
     {
         Ok(config) => config.resolve_extension_policy_with_metadata(policy_override),

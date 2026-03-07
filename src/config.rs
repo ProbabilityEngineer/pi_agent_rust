@@ -318,8 +318,26 @@ impl Config {
     /// Load configuration from global and project settings.
     pub fn load() -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let config_path = std::env::var_os("PI_CONFIG_PATH").map(PathBuf::from);
+        let config_path = Self::config_path_override_from_env(&cwd);
         Self::load_with_roots(config_path.as_deref(), &Self::global_dir(), &cwd)
+    }
+
+    /// Resolve a config override path relative to the supplied cwd.
+    #[must_use]
+    pub(crate) fn resolve_config_override_path(path: &Path, cwd: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        }
+    }
+
+    /// Resolve the `PI_CONFIG_PATH` override relative to the supplied cwd.
+    #[must_use]
+    pub(crate) fn config_path_override_from_env(cwd: &Path) -> Option<PathBuf> {
+        std::env::var_os("PI_CONFIG_PATH")
+            .map(PathBuf::from)
+            .map(|path| Self::resolve_config_override_path(&path, cwd))
     }
 
     /// Get the global configuration directory.
@@ -398,7 +416,7 @@ impl Config {
         cwd: &std::path::Path,
     ) -> Result<Self> {
         if let Some(path) = config_path {
-            let config = Self::load_from_path(path)?;
+            let config = Self::load_from_path(&Self::resolve_config_override_path(path, cwd))?;
             config.emit_queue_mode_diagnostics();
             return Ok(config);
         }
@@ -1257,6 +1275,24 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("read current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
     fn write_file(path: &std::path::Path, contents: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parent dir");
@@ -1298,6 +1334,49 @@ mod tests {
 
         let config =
             Config::load_with_roots(Some(&override_path), &global_dir, &cwd).expect("load config");
+        assert_eq!(config.theme.as_deref(), Some("override"));
+        assert_eq!(config.default_provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn resolve_config_override_path_anchors_relative_paths_to_supplied_cwd() {
+        let cwd = PathBuf::from("/tmp/pi-agent");
+        let relative = PathBuf::from("config/override.json");
+        let absolute = PathBuf::from("/etc/pi/settings.json");
+
+        assert_eq!(
+            Config::resolve_config_override_path(&relative, &cwd),
+            cwd.join("config/override.json")
+        );
+        assert_eq!(
+            Config::resolve_config_override_path(&absolute, &cwd),
+            absolute
+        );
+    }
+
+    #[test]
+    fn load_with_roots_resolves_relative_override_against_supplied_cwd() {
+        let temp = TempDir::new().expect("create tempdir");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir_all(&unrelated).expect("create unrelated dir");
+        let _guard = CurrentDirGuard::set(&unrelated);
+
+        let cwd = temp.path().join("cwd");
+        let global_dir = temp.path().join("global");
+        let override_dir = cwd.join("config");
+        std::fs::create_dir_all(&override_dir).expect("create override dir");
+        write_file(
+            &override_dir.join("override.json"),
+            r#"{ "theme": "override", "default_provider": "openai" }"#,
+        );
+
+        let config = Config::load_with_roots(
+            Some(std::path::Path::new("config/override.json")),
+            &global_dir,
+            &cwd,
+        )
+        .expect("load config");
+
         assert_eq!(config.theme.as_deref(), Some("override"));
         assert_eq!(config.default_provider.as_deref(), Some("openai"));
     }
