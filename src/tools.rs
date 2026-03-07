@@ -1840,13 +1840,23 @@ pub(crate) async fn run_bash_command(
         "sh"
     });
 
-    let mut child = Command::new(shell)
-        .arg("-c")
+    let mut cmd = Command::new(shell);
+    cmd.arg("-c")
         .arg(&command)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Place the shell in its own process group so background children
+    // can be killed reliably via killpg even if the shell exits first.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| Error::tool("bash", format!("Failed to spawn shell: {e}")))?;
 
@@ -4542,6 +4552,26 @@ fn kill_process_tree_with(pid: Option<u32>, signal: sysinfo::Signal) {
     let Some(pid) = pid else {
         return;
     };
+
+    // Kill the entire process group first. The bash tool spawns
+    // children with process_group(0) so the root PID is the PGID.
+    // This catches background children even if reparented to init.
+    #[cfg(unix)]
+    {
+        let sig_num = match signal {
+            sysinfo::Signal::Kill => "9",
+            _ => "15",
+        };
+        let _ = Command::new("kill")
+            .arg(format!("-{sig_num}"))
+            .arg("--")
+            .arg(format!("-{pid}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
     let root = sysinfo::Pid::from_u32(pid);
 
     let mut sys = sysinfo::System::new();
