@@ -178,6 +178,30 @@ fn bearer_token_from_authorization_header(value: &str) -> Option<String> {
     }
 }
 
+fn first_header_value_case_insensitive<'a>(
+    headers: &'a HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
+}
+
+fn authorization_override(
+    options: &StreamOptions,
+    compat: Option<&CompatConfig>,
+) -> Option<String> {
+    first_header_value_case_insensitive(&options.headers, "authorization")
+        .or_else(|| {
+            compat
+                .and_then(|compat| compat.custom_headers.as_ref())
+                .and_then(|headers| first_header_value_case_insensitive(headers, "authorization"))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 #[async_trait]
 impl Provider for OpenAIResponsesProvider {
     fn name(&self) -> &str {
@@ -198,19 +222,9 @@ impl Provider for OpenAIResponsesProvider {
         context: &Context<'_>,
         options: &StreamOptions,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        let has_authorization_header = options
-            .headers
-            .keys()
-            .any(|key| key.eq_ignore_ascii_case("authorization"));
-        let authorization_header_value = options.headers.iter().find_map(|(key, value)| {
-            if key.eq_ignore_ascii_case("authorization") {
-                Some(value.trim().to_string())
-            } else {
-                None
-            }
-        });
+        let authorization_header_value = authorization_override(options, self.compat.as_ref());
 
-        let auth_value = if has_authorization_header {
+        let auth_value = if authorization_header_value.is_some() {
             None
         } else {
             Some(
@@ -2361,6 +2375,12 @@ mod tests {
             captured.headers.get("authorization").map(String::as_str),
             Some(expected_auth.as_str())
         );
+        assert_eq!(captured.header_count("authorization"), 1);
+        assert_eq!(
+            captured.headers.get("user-agent").map(String::as_str),
+            Some("pi_agent_rust")
+        );
+        assert_eq!(captured.header_count("user-agent"), 1);
         assert_eq!(
             captured
                 .headers
@@ -2375,6 +2395,60 @@ mod tests {
         assert_eq!(
             captured.headers.get("session_id").map(String::as_str),
             Some("session-abc")
+        );
+    }
+
+    #[test]
+    fn test_codex_mode_accepts_compat_authorization_header_without_api_key() {
+        let (base_url, rx) = spawn_test_server(200, "text/event-stream", &success_sse_body());
+        let test_jwt = build_test_jwt("acct_compat_456");
+        let mut custom_headers = HashMap::new();
+        custom_headers.insert("Authorization".to_string(), format!("Bearer {test_jwt}"));
+        let provider = OpenAIResponsesProvider::new("gpt-4o")
+            .with_provider_name("openai-codex")
+            .with_api_name("openai-codex-responses")
+            .with_codex_mode(true)
+            .with_base_url(base_url)
+            .with_compat(Some(CompatConfig {
+                custom_headers: Some(custom_headers),
+                ..Default::default()
+            }));
+        let context = Context::owned(
+            None,
+            vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })],
+            Vec::new(),
+        );
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(&context, &StreamOptions::default())
+                .await
+                .expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let captured = rx.recv_timeout(Duration::from_secs(2)).expect("captured");
+        assert_eq!(captured.header_count("authorization"), 1);
+        assert_eq!(
+            captured.headers.get("authorization").map(String::as_str),
+            Some(format!("Bearer {test_jwt}").as_str())
+        );
+        assert_eq!(
+            captured
+                .headers
+                .get("chatgpt-account-id")
+                .map(String::as_str),
+            Some("acct_compat_456")
         );
     }
 
@@ -2469,7 +2543,17 @@ mod tests {
     #[derive(Debug)]
     struct CapturedRequest {
         headers: HashMap<String, String>,
+        header_lines: Vec<(String, String)>,
         body: String,
+    }
+
+    impl CapturedRequest {
+        fn header_count(&self, name: &str) -> usize {
+            self.header_lines
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .count()
+        }
     }
 
     fn run_stream_and_capture_headers() -> Option<CapturedRequest> {
@@ -2556,7 +2640,7 @@ mod tests {
                 .position(|window| window == b"\r\n\r\n")
                 .expect("request header boundary");
             let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
-            let headers = parse_headers(&header_text);
+            let (headers, header_lines) = parse_headers(&header_text);
             let mut request_body = bytes[header_end + 4..].to_vec();
 
             let content_length = headers
@@ -2579,6 +2663,7 @@ mod tests {
 
             let captured = CapturedRequest {
                 headers,
+                header_lines,
                 body: String::from_utf8_lossy(&request_body).to_string(),
             };
             tx.send(captured).expect("send captured request");
@@ -2601,14 +2686,18 @@ mod tests {
         (format!("http://{addr}/responses"), rx)
     }
 
-    fn parse_headers(header_text: &str) -> HashMap<String, String> {
+    fn parse_headers(header_text: &str) -> (HashMap<String, String>, Vec<(String, String)>) {
         let mut headers = HashMap::new();
+        let mut header_lines = Vec::new();
         for line in header_text.lines().skip(1) {
             if let Some((name, value)) = line.split_once(':') {
-                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                let normalized_name = name.trim().to_ascii_lowercase();
+                let normalized_value = value.trim().to_string();
+                header_lines.push((normalized_name.clone(), normalized_value.clone()));
+                headers.insert(normalized_name, normalized_value);
             }
         }
-        headers
+        (headers, header_lines)
     }
 
     // ========================================================================

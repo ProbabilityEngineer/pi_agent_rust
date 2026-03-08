@@ -144,7 +144,18 @@ impl<'a> RequestBuilder<'a> {
 
     #[must_use]
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((key.into(), value.into()));
+        let key = key.into();
+        let value = value.into();
+        if let Some((existing_key, existing_value)) = self
+            .headers
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key.eq_ignore_ascii_case(&key))
+        {
+            *existing_key = key;
+            *existing_value = value;
+        } else {
+            self.headers.push((key, value));
+        }
         self
     }
 
@@ -170,8 +181,7 @@ impl<'a> RequestBuilder<'a> {
     }
 
     pub fn json<T: serde::Serialize>(mut self, payload: &T) -> Result<Self> {
-        self.headers
-            .push(("Content-Type".to_string(), "application/json".to_string()));
+        self = self.header("Content-Type", "application/json");
         self.body = serde_json::to_vec(payload)?;
         Ok(self)
     }
@@ -418,6 +428,16 @@ fn sanitize_header_value(value: &str) -> String {
     value.chars().filter(|&c| c != '\r' && c != '\n').collect()
 }
 
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().rev().find_map(|(key, value)| {
+        if key.eq_ignore_ascii_case(name) {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
+}
+
 fn build_request_bytes(
     method: Method,
     parsed: &ParsedUrl,
@@ -426,16 +446,26 @@ fn build_request_bytes(
     body: &[u8],
 ) -> Vec<u8> {
     let mut out = String::new();
+    let effective_user_agent = header_value(headers, "user-agent").unwrap_or(user_agent);
     let _ = std::fmt::Write::write_fmt(
         &mut out,
         format_args!("{} {} HTTP/1.1\r\n", method.as_str(), parsed.path),
     );
     let _ = std::fmt::Write::write_fmt(&mut out, format_args!("Host: {}\r\n", parsed.host));
-    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("User-Agent: {user_agent}\r\n"));
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("User-Agent: {effective_user_agent}\r\n"),
+    );
     let _ =
         std::fmt::Write::write_fmt(&mut out, format_args!("Content-Length: {}\r\n", body.len()));
 
     for (name, value) in headers {
+        if name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("user-agent")
+            || name.eq_ignore_ascii_case("content-length")
+        {
+            continue;
+        }
         let clean_name = sanitize_header_value(name);
         let clean_value = sanitize_header_value(value);
         let _ =
@@ -1098,6 +1128,34 @@ mod tests {
         assert!(text.contains("X-Custom: value\r\n"));
     }
 
+    #[test]
+    fn build_request_bytes_reserved_headers_are_canonicalized() {
+        let parsed = ParsedUrl::parse("https://api.example.com/v1/messages").unwrap();
+        let headers = vec![
+            ("Host".to_string(), "spoofed.example.com".to_string()),
+            ("User-Agent".to_string(), "custom-agent".to_string()),
+            ("Content-Length".to_string(), "999".to_string()),
+            ("X-Test".to_string(), "1".to_string()),
+        ];
+        let body = b"hello";
+        let bytes = build_request_bytes(Method::Post, &parsed, "default-agent", &headers, body);
+        let text = String::from_utf8(bytes).unwrap();
+
+        assert_eq!(text.matches("Host: ").count(), 1);
+        assert!(text.contains("Host: api.example.com\r\n"));
+        assert!(!text.contains("Host: spoofed.example.com\r\n"));
+
+        assert_eq!(text.matches("User-Agent: ").count(), 1);
+        assert!(text.contains("User-Agent: custom-agent\r\n"));
+        assert!(!text.contains("User-Agent: default-agent\r\n"));
+
+        assert_eq!(text.matches("Content-Length: ").count(), 1);
+        assert!(text.contains("Content-Length: 5\r\n"));
+        assert!(!text.contains("Content-Length: 999\r\n"));
+
+        assert!(text.contains("X-Test: 1\r\n"));
+    }
+
     // ── build_recorded_request ─────────────────────────────────────────
     #[test]
     fn build_recorded_request_empty_body() {
@@ -1265,6 +1323,19 @@ mod tests {
             .header("Authorization", "Bearer test")
             .header("X-Custom", "value");
         assert_eq!(builder.headers.len(), 2);
+    }
+
+    #[test]
+    fn request_builder_header_replaces_case_insensitive_duplicate_names() {
+        let client = Client::new();
+        let builder = client
+            .post("https://api.example.com")
+            .header("Authorization", "Bearer first")
+            .header("authorization", "Bearer second");
+
+        assert_eq!(builder.headers.len(), 1);
+        assert!(builder.headers[0].0.eq_ignore_ascii_case("authorization"));
+        assert_eq!(builder.headers[0].1, "Bearer second");
     }
 
     #[test]
